@@ -1,0 +1,27 @@
+name: Build ICS
+
+on:
+  schedule:
+    - cron: "0 0 * * 1"
+  workflow_dispatch:
+
+jobs:
+  generate-ics:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Generate weekend schedule
+        run: python scrape_weekend_time.py weekend_schedule.ics
+
+      # - name: Upload ICS artifact
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: weekend-schedule
+      #     path: weekend_schedule.ics
