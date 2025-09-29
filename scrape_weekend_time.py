@@ -21,6 +21,7 @@ DAY_CONFIG = {
     "\u5468\u65e5": ("Sunday", 6),
 }
 
+TIME_RANGE_RE = re.compile(r"(\d{1,2}:\d{2})\s*[\-~\u2013]\s*(\d{1,2}:\d{2})")
 
 def fetch_content():
     """Attempt to fetch the schedule page, falling back via Jina if needed."""
@@ -40,12 +41,53 @@ def fetch_content():
             last_exc = exc
     raise RuntimeError(f"Unable to fetch schedule: {last_exc}")
 
-
-def extract_time_ranges(text: str):
-    """Extract time ranges for Friday, Saturday, Sunday from the given text."""
+def extract_time_ranges(text: str, current_week: int | None = None):
+    """Extract time ranges for weekend training sessions."""
     time_map = {}
     normalized_lines = [line.strip().replace("\uff1a", ":") for line in text.splitlines()]
     in_week_section = False
+    pending_day = None
+    pending_rows = []
+
+    def parse_week_spec(spec: str):
+        weeks = set()
+        tokens = re.split(r"[,\uFF0C\u3001]", spec)
+        for token in tokens:
+            token = token.strip()
+            if not token:
+                continue
+            token = token.replace("\u5468", "")
+            range_match = re.match(r"(\d{1,2})\s*[-~\u2013]\s*(\d{1,2})", token)
+            if range_match:
+                start_week, end_week = map(int, range_match.groups())
+                if start_week <= end_week:
+                    weeks.update(range(start_week, end_week + 1))
+                else:
+                    weeks.update(range(end_week, start_week + 1))
+                continue
+            for number in re.findall(r"\d+", token):
+                weeks.add(int(number))
+        return weeks
+
+    def choose_table_time(rows):
+        if current_week is not None:
+            for spec, start, end in rows:
+                weeks = parse_week_spec(spec)
+                if weeks and current_week in weeks:
+                    return start, end
+        for _, start, end in rows:
+            if start and end:
+                return start, end
+        return None
+
+    def finalize_table():
+        nonlocal pending_day, pending_rows
+        if pending_day and pending_rows:
+            chosen = choose_table_time(pending_rows)
+            if chosen:
+                time_map[pending_day] = chosen
+        pending_day = None
+        pending_rows = []
 
     for line in normalized_lines:
         if not in_week_section and "\u672c\u5468\u5b89\u6392" in line:
@@ -53,16 +95,49 @@ def extract_time_ranges(text: str):
             continue
         if not in_week_section:
             continue
+
+        if pending_day and pending_rows and line and not line.startswith("|"):
+            finalize_table()
+
+        if pending_day and line.startswith("|"):
+            cells = [cell.strip() for cell in line.strip("|").split("|")]
+            if len(cells) >= 2 and not all(cell.strip("- ") == "" for cell in cells[:2]):
+                time_match = TIME_RANGE_RE.search(cells[1])
+                if time_match:
+                    pending_rows.append((cells[0], time_match.group(1), time_match.group(2)))
+            continue
+
+        if pending_day and not line:
+            continue
+
         if not line or not line.startswith("*"):
             continue
-        for day, _ in DAY_CONFIG.items():
+
+        matched_day = None
+        for day in DAY_CONFIG:
             if day in line:
-                match = re.search(r"(\d{1,2}:\d{2})\s*[\-~\u2013]\s*(\d{1,2}:\d{2})", line)
-                if match:
-                    time_map[day] = match.group(1), match.group(2)
+                matched_day = day
+                break
+        if matched_day is None:
+            continue
+
+        time_match = TIME_RANGE_RE.search(line)
+        if time_match:
+            time_map[matched_day] = (time_match.group(1), time_match.group(2))
+            pending_day = None
+            pending_rows = []
+        else:
+            pending_day = matched_day
+            pending_rows = []
+
         if len(time_map) == len(DAY_CONFIG):
             break
+
+    if pending_day and pending_rows:
+        finalize_table()
+
     return time_map
+
 
 
 def parse_clock(clock_str: str) -> time:
@@ -124,15 +199,16 @@ def build_ics(events, calendar_name="CZQ Weekend Training"):
     lines.append("END:VCALENDAR")
     return "\n".join(lines) + "\n"
 
-
 def main(output_path: str = "weekend_schedule.ics"):
     content, source_label = fetch_content()
-    time_map = extract_time_ranges(content)
+    tzinfo = ensure_timezone()
+    now = datetime.now(tzinfo)
+    current_week = now.isocalendar()[1]
+    time_map = extract_time_ranges(content, current_week=current_week)
     if len(time_map) < len(DAY_CONFIG):
         raise SystemExit("Failed to parse all weekend slots. The page layout may have changed.")
 
-    tzinfo = ensure_timezone()
-    today = datetime.now(tzinfo).date()
+    today = now.date()
     events = []
 
     for day_cn, (day_en, weekday_index) in DAY_CONFIG.items():
@@ -156,6 +232,7 @@ def main(output_path: str = "weekend_schedule.ics"):
     ics_text = build_ics(events)
     Path(output_path).write_text(ics_text, encoding="utf-8")
     print(f"Generated {output_path} using {source_label} data")
+
 
 
 if __name__ == "__main__":
